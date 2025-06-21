@@ -1,6 +1,6 @@
 
 INITAPPS +=
 
-USERLIB	+=
+USERLIB	+= lib/path.o
 
-USERAPPS +=
+USERAPPS += touch.b mkdir.b rm.b

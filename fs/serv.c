@@ -334,6 +334,17 @@ void serve_sync(u_int envid) {
 	ipc_send(envid, 0, 0, 0);
 }
 
+void serve_create(u_int envid, struct Fsreq_create *rq) {
+	int r;
+	struct File *file;
+	if((r = file_create(rq->req_path, &file)) < 0) {
+		ipc_send(envid, r, 0, 0);
+		return;
+	}
+	file->f_type = rq->type;
+	ipc_send(envid, 0, 0, 0);
+}
+
 /*
  * The serve function table
  * File system use this table and the request number to
@@ -342,7 +353,7 @@ void serve_sync(u_int envid) {
 void *serve_table[MAX_FSREQNO] = {
     [FSREQ_OPEN] = serve_open,	 [FSREQ_MAP] = serve_map,     [FSREQ_SET_SIZE] = serve_set_size,
     [FSREQ_CLOSE] = serve_close, [FSREQ_DIRTY] = serve_dirty, [FSREQ_REMOVE] = serve_remove,
-    [FSREQ_SYNC] = serve_sync,
+    [FSREQ_SYNC] = serve_sync,	 [FSREQ_CREATE] = serve_create,
 };
 
 /*

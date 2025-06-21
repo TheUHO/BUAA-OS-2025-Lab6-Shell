@@ -74,3 +74,11 @@ int syscall_read_dev(void *va, u_int dev, u_int size) {
 	/* Exercise 5.2: Your code here. (2/2) */
 	return msyscall(SYS_read_dev, va, dev, size);
 }
+
+int syscall_get_cur_path(char *buf) {
+    return msyscall(SYS_get_cur_path, buf);
+}
+
+int syscall_set_cur_path(char *path) {
+    return msyscall(SYS_set_cur_path, path);
+}

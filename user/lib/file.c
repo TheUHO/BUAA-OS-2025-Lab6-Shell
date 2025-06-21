@@ -37,8 +37,17 @@ int open(const char *path, int mode) {
 	}
 	// Step 2: Prepare the 'fd' using 'fsipc_open' in fsipc.c.
 	/* Exercise 5.9: Your code here. (2/5) */
-	if ((r = fsipc_open(path, mode, fd)) != 0) {
-		return r;
+	char ab_path[128];
+	if (path[0] != '/') {
+		try(getcwd(ab_path));
+		pathcat(ab_path, path);
+		if ((r = fsipc_open(ab_path, mode, fd)) != 0) {
+			return r;
+		}
+	} else {
+		if ((r = fsipc_open(path, mode, fd)) != 0) {
+			return r;
+		}
 	}
 	// Step 3: Set 'va' to the address of the page where the 'fd''s data is cached, using
 	// 'fd2data'. Set 'size' and 'fileid' correctly with the value in 'fd' as a 'Filefd'.
@@ -254,13 +263,30 @@ int ftruncate(int fdnum, u_int size) {
 //  Delete a file or directory.
 int remove(const char *path) {
 	// Call fsipc_remove.
-
 	/* Exercise 5.13: Your code here. */
-	return fsipc_remove(path);
+	char ab_path[128];
+	if (path[0] != '/') {
+		try(getcwd(ab_path));
+		pathcat(ab_path, path);
+		return fsipc_remove(ab_path);
+	} else {
+		return fsipc_remove(path);
+	}
 }
 
 // Overview:
 //  Synchronize disk with buffer cache
 int sync(void) {
 	return fsipc_sync();
+}
+
+int create(const char *path, u_int type) {
+	char ab_path[128];
+	if (path[0] != '/') {
+		try(getcwd(ab_path));
+		pathcat(ab_path, path);
+		return fsipc_create(ab_path, type);
+	} else {
+		return fsipc_create(path, type);
+	}
 }

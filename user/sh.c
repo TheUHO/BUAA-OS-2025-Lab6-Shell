@@ -169,16 +169,143 @@ int parsecmd(char **argv, int *rightpipe) {
 	return argc;
 }
 
+/*
+ * 内建 cd 命令实现：
+ * 当用户输入 "cd dir" 时，根据 dir 是否为绝对路径或相对路径，
+ * 检查路径合法性后修改当前工作目录。
+ */
+int chpwd(int argc, char **argv) {
+    int r;
+	if (argc == 1) {
+		if ((r = chdir("/")) < 0) {
+            printf("cd failed: %d\n", r);
+            return 0;
+			// exit();
+        }
+		return 0;
+	}
+    if (argc > 2) {
+        printf("Too many args for cd command\n");
+        return 1;
+		exit();
+	}
+	struct Stat state;
+    if (argv[1][0] == '/') { // 绝对路径处理
+        if ((r = stat(argv[1], &state)) < 0) {
+            printf("cd: The directory '%s' does not exist\n", argv[1]);
+            return 1;
+			exit();
+		}
+        if (!state.st_isdir) {
+            printf("cd: '%s' is not a directory\n", argv[1]);
+            return 1;
+			exit();
+		}
+        if ((r = chdir(argv[1])) < 0) {
+            printf("cd failed: %d\n", r);
+            return 1;
+			exit();
+        }
+    } else { // 相对路径处理
+        char path[128];
+        if ((r = getcwd(path)) < 0) {
+            printf("cd failed: %d\n", r);
+            return 1;
+			exit();
+        }
+        // 特殊处理 ".."：退回上一级目录
+        if (argv[1][0] == '.' && argv[1][1] == '.') {
+            int len = strlen(path);
+            while (len > 1 && path[len - 1] != '/') {
+                path[len - 1] = '\0';
+                len--;
+            }
+            if (len > 1) {
+                path[len - 1] = '\0';
+            }
+			if (strlen(argv[1]) > 3) { // "../xxx"
+				pathcat(path, argv[1] + 3);
+				// printf("current path: %s\n", path);
+			}
+        } else {
+            pathcat(path, argv[1]);
+			// printf("current path: %s\n", path);
+        }
+		if ((r = open(path, O_RDONLY)) < 0) {
+			printf("cd: The directory '%s' does not exist\n", argv[1]);
+			return 1;
+			exit();
+		}
+		close(r);
+        if ((r = stat(path, &state)) < 0) {
+            printf("cd: The directory '%s' does not exist\n", argv[1]);
+            return 1;
+			exit();
+        }
+        if (!state.st_isdir) {
+            printf("cd: '%s' is not a directory\n", argv[1]);
+            return 1;
+			exit();
+        }
+        if ((r = chdir(path)) < 0) {
+            printf("cd failed: %d\n", r);
+            return 1;
+			exit();
+        }
+    }
+    return 0;
+}
+
+/*
+ * 内建 pwd 命令实现：
+ * 打印当前进程的工作目录
+ */
+int pwd(int argc) {
+	if (argc != 1) {
+		printf("pwd: expected 0 arguments; got %d\n", argc);
+		return 2;
+		// return;
+	}
+    char path[128];
+    int r;
+    if ((r = getcwd(path)) < 0) {
+        printf("pwd failed: %d\n", r);
+        return 2;
+		// return;
+    }
+    printf("%s\n", path);
+	return 0;
+}
+
 void runcmd(char *s) {
 	gettoken(s, 0);
 
 	char *argv[MAXARGS];
 	int rightpipe = 0;
+	int r;
 	int argc = parsecmd(argv, &rightpipe);
 	if (argc == 0) {
 		return;
 	}
 	argv[argc] = 0;
+
+	// 对于内建指令
+	// printf("do incmd argc: %d\n", argc);
+	if (argc > 0) {
+		// printf("do cd2\n");
+		if (strcmp(argv[0], "cd") == 0) {
+			// printf("do cd3\n");
+			if ((r = chpwd(argc, argv)) != 0) {
+				return;
+			}
+			return;
+		} else if (strcmp(argv[0], "pwd") == 0) {
+			if ((r = pwd(argc)) != 0) {
+				return;
+			}
+			return;
+		}
+	}
 
 	int child = spawn(argv[0], argv);
 	close_all();
@@ -231,6 +358,16 @@ void usage(void) {
 	exit();
 }
 
+int startswith(const char *s, const char *prefix) {
+    while (*prefix) {
+        if (*s != *prefix)
+            return 0;
+        s++;
+        prefix++;
+    }
+    return (*s == '\0' || strchr(WHITESPACE, *s) != 0);
+}
+
 int main(int argc, char **argv) {
 	int r;
 	int interactive = iscons(0);
@@ -260,6 +397,9 @@ int main(int argc, char **argv) {
 		if ((r = open(argv[0], O_RDONLY)) < 0) {
 			user_panic("open %s: %d", argv[0], r);
 		}
+		if ((r = chdir("/")) < 0) {
+			printf("created root path failed: %d\n", r);
+		}
 		user_assert(r == 0);
 	}
 	for (;;) {
@@ -274,6 +414,14 @@ int main(int argc, char **argv) {
 		if (echocmds) {
 			printf("# %s\n", buf);
 		}
+		// 根据 buf 的起始判断是否为内建命令 exit、cd 或 pwd
+        if (startswith(buf, "exit")) {
+            break; // 直接退出循环
+        }
+        if (startswith(buf, "cd") || startswith(buf, "pwd")) {
+            runcmd(buf);
+            continue;
+        }
 		if ((r = fork()) < 0) {
 			user_panic("fork: %d", r);
 		}

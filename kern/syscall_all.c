@@ -519,6 +519,24 @@ int sys_read_dev(u_int va, u_int pa, u_int len) {
 	return 0;
 }
 
+#define MAX_PATH_LEN    128
+#define E_CUR_PATH      2025
+
+int sys_get_cur_path(char *buf) {
+	// just copy current path
+    strcpy(buf, cur_path);
+    return 0;
+}
+
+int sys_set_cur_path(char *path) {
+	// just copy current path
+    if (strlen(path) >= MAX_PATH_LEN) {
+        return -E_CUR_PATH;
+    }
+    strcpy(cur_path, path);
+    return 0;
+}
+
 void *syscall_table[MAX_SYSNO] = {
     [SYS_putchar] = sys_putchar,
     [SYS_print_cons] = sys_print_cons,
@@ -538,6 +556,8 @@ void *syscall_table[MAX_SYSNO] = {
     [SYS_cgetc] = sys_cgetc,
     [SYS_write_dev] = sys_write_dev,
     [SYS_read_dev] = sys_read_dev,
+	[SYS_get_cur_path] = sys_get_cur_path,
+	[SYS_set_cur_path] = sys_set_cur_path,
 };
 
 /* Overview:

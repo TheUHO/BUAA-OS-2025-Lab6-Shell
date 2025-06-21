@@ -101,6 +101,28 @@ static int spawn_mapper(void *data, u_long va, size_t offset, u_int perm, const 
 	return 0;
 }
 
+#define MAX_PATH_LEN 128
+
+void spawn_command(const char *prog, char *aprog) {
+	if (prog[0] != '/') {
+		char cwd[MAX_PATH_LEN];
+		// 获取当前工作目录
+		if(getcwd(cwd) < 0) {
+			user_panic("getcwd failed in spawn");
+		}
+		// 构造绝对路径：当前工作目录 + "/" + prog
+        char abs_prog[MAX_PATH_LEN];
+		strcpy(abs_prog, cwd);
+		// 将 prog 拼接到当前工作目录上
+		pathcat(abs_prog, prog);
+		// 将生成的绝对路径复制到 aprog 中
+		strcpy(aprog, abs_prog);
+	} else {
+		// 如果 prog 已经是绝对路径，直接复制
+		strcpy(aprog, prog);
+	}
+}
+
 /* Note:
  *   This function involves loading executable code to memory. After the completion of load
  *   procedures, D-cache and I-cache writeback/invalidation MUST be performed to maintain cache
@@ -111,7 +133,10 @@ int spawn(char *prog, char **argv) {
 	// Step 1: Open the file 'prog' (the path of the program).
 	// Return the error if 'open' fails.
 	int fd;
-	if ((fd = open(prog, O_RDONLY)) < 0) {
+	char aprog[MAX_PATH_LEN];
+    // 调用 spawn_command 生成绝对路径 aprog
+    spawn_command(prog, aprog);
+	if ((fd = open(aprog, O_RDONLY)) < 0) {
 		return fd;
 	}
 

@@ -11,6 +11,9 @@ struct Env envs[NENV] __attribute__((aligned(PAGE_SIZE))); // All environments
 struct Env *curenv = NULL;	      // the current env
 static struct Env_list env_free_list; // Free list
 
+// Initialize current directory to root.
+char cur_path[128] = "/";
+
 // Invariant: 'env' in 'env_sched_list' iff. 'env->env_status' is 'RUNNABLE'.
 struct Env_sched_list env_sched_list; // Runnable list
 
