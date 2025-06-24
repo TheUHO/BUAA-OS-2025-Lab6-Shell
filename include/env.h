@@ -39,6 +39,11 @@ struct Env {
 
 	// Lab 6 scheduler counts
 	u_int env_runs; // number of times we've been env_run'ed
+
+	// shell id 用于环境变量权限判断
+    int env_shell_id;
+	/* 本环境自己的环境变量链表 */
+    struct Var *env_vars;
 };
 
 LIST_HEAD(Env_list, Env);
@@ -74,4 +79,24 @@ void envid2env_check(void);
 		env_create(binary_##x##_start, (u_int)binary_##x##_size, 1);                       \
 	})
 
+#define MAX_VAR_NAME 16
+#define MAX_VAR_VALUE 16
+#define E_PERM       -2  /* 权限错误 */
+
+typedef struct Var {
+    char name[MAX_VAR_NAME + 1];
+    char value[MAX_VAR_VALUE + 1];
+    int perm;  // 1 表示只读（不可修改、不可 unset）
+    int owner; // 对应 env_shell_id，0 表示全局变量
+    struct Var *next;
+} Var;
+
+/* 环境变量操作函数：针对指定 Env 的 env_vars 链表 */
+int envvar_declare(struct Env *env, const char *name, const char *value, int perm, int caller_shell_id);
+int envvar_unset(struct Env *env, const char *name);
+int envvar_get(struct Env *env, const char *name, char *value, int bufsize);
+int envvar_getall(struct Env *env, char *buf, int bufsize);
+
+/* 当父进程创建子进程时，只复制父进程中 owner==0 的全局变量到子进程 */
+void env_copy_vars(struct Env *child, struct Env *parent);
 #endif // !_ENV_H_

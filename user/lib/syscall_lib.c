@@ -82,3 +82,23 @@ int syscall_get_cur_path(char *buf) {
 int syscall_set_cur_path(char *path) {
     return msyscall(SYS_set_cur_path, path);
 }
+
+int syscall_alloc_shell_id(void) {
+	return msyscall(SYS_alloc_shell_id);
+}
+
+int syscall_declare_var(const char *name, const char *value, int perm, int caller_shell_id) {
+    return msyscall(SYS_declare_var, (u_int)name, (u_int)value, perm, caller_shell_id);
+}
+
+int syscall_unset_var(const char *name, int caller_shell_id) {
+    return msyscall(SYS_unset_var, (u_int)name, caller_shell_id);
+}
+
+int syscall_get_var(const char *name, char *value, int bufsize) {
+    return msyscall(SYS_get_var, (u_int)name, (u_int)value, bufsize);
+}
+
+int syscall_get_all_var(char *buf, int bufsize) {
+    return msyscall(SYS_get_all_var, (u_int)buf, bufsize);
+}

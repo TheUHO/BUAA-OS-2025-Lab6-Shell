@@ -4,6 +4,8 @@
 #define WHITESPACE " \t\r\n"
 #define SYMBOLS "<|>&;()"
 
+int global_shell_id;
+
 /* Overview:
  *   Parse the next token from the string at s.
  *
@@ -61,6 +63,60 @@ int gettoken(char *s, char **p1) {
 	*p1 = np1;
 	nc = _gettoken(np2, &np1, &np2);
 	return c;
+}
+
+/* 
+ * 变量展开：若 token 以 '$' 开头，通过系统调用获取变量值替换 token。
+ */
+void expand_token(const char *token, char *dest, int dest_size) {
+    if (token[0] != '$') {
+        int i = 0;
+        while (i < dest_size - 1 && token[i] != '\0') {
+            dest[i] = token[i];
+            i++;
+        }
+        dest[i] = '\0';
+        return;
+    }
+    // token以'$'开头，从下标1开始扫描变量名，变量名由字母、数字、下划线组成
+    int i = 1, j = 0;
+    char varname[64];
+    while (token[i] && ((token[i] >= 'a' && token[i] <= 'z') ||
+           (token[i] >= 'A' && token[i] <= 'Z') ||
+           (token[i] == '_') || (token[i] >= '0' && token[i] <= '9')) && j < (int)sizeof(varname)-1) {
+        varname[j++] = token[i++];
+    }
+    varname[j] = '\0';
+
+    // 通过系统调用获取变量值
+    char value[128];
+    syscall_get_var(varname, value, sizeof(value));
+	// printf("value: %s\n", value);
+    // 逐字符拼接，将 value 拷贝到 dest 中
+    int d = 0, k = 0;
+    while (d < dest_size - 1 && value[k] != '\0') {
+        dest[d++] = value[k++];
+    }
+    // 将 token 剩余部分追加到 dest 中
+    k = 0;
+    while (d < dest_size - 1 && token[i + k] != '\0') {
+        dest[d++] = token[i + k++];
+    }
+    dest[d] = '\0';
+	// printf("dest: %s\n", dest);
+}
+
+/* 对 argv 数组中的每个参数进行变量展开 */
+void expand_argv(int argc, char **argv) {
+    for (int i = 0; i < argc; i++) {
+        if (argv[i][0] == '$') {
+            char expanded[128];
+            expand_token(argv[i], expanded, sizeof(expanded));
+            /* 用展开后的字符串替换原 token */
+            strcpy(argv[i], expanded);
+			// printf("expand: %s\n", expanded);
+        }
+    }
 }
 
 #define MAXARGS 128
@@ -277,6 +333,86 @@ int pwd(int argc) {
 	return 0;
 }
 
+static void strncpy(char *dest, const char *src, int n) {
+    int i = 0;
+    while (i < n - 1 && src[i] != '\0') {
+        dest[i] = src[i];
+        i++;
+    }
+    dest[i] = '\0';
+}
+
+/* 内建指令 declare 实现
+   格式: declare [-r] [-x] [NAME[=VALUE]]
+   其中：-r 表示只读，-x 表示环境变量（caller_shell_id 置为 0 为全局，否则传入shell的id）
+*/
+int declare(int argc, char **argv, int global_shell_id) {
+    int perm = 0; /* 默认为可修改 */
+    int export_flag = 0;  /* export_flag==1 表示全局环境变量 */
+    int i = 1;
+    while (i < argc && argv[i][0] == '-' && argv[i][1] != '\0') {
+        for (int j = 1; argv[i][j] != '\0'; j++) {
+            if (argv[i][j] == 'r') {
+                perm = 1;
+            } else if (argv[i][j] == 'x') {
+                export_flag = 1;
+            } else {
+                printf("declare: unknown flag -%c\n", argv[i][j]);
+                return 1;
+            }
+        }
+        i++;
+    }
+    if (i >= argc) {
+        /* 若无后续参数，则输出所有变量 */
+        char all[1024];
+        syscall_get_all_var(all, sizeof(all));
+        printf("%s", all);
+        return 0;
+    }
+    /* 处理 NAME[=VALUE] */
+    char *arg = argv[i];
+    char name[MAX_VAR_NAME + 1];
+    char value[MAX_VAR_VALUE + 1];
+    value[0] = '\0';
+    const char *eq = strchr(arg, '=');
+    if (eq) {
+        int nlen = eq - arg + 1;
+        if (nlen > MAX_VAR_NAME)
+            nlen = MAX_VAR_NAME;
+        strncpy(name, arg, nlen);
+        strncpy(value, eq + 1, MAX_VAR_VALUE);
+    } else {
+        strncpy(name, arg, MAX_VAR_NAME);
+    }
+    int caller = export_flag ? 0 : global_shell_id;
+	printf("name: %s, value: %s, caller: %d\n", name, value, caller);
+	int ret = syscall_declare_var(name, value, perm, caller);
+    if (ret != 0) {
+        printf("declare: failed to declare variable %s\n", name);
+        return 1;
+    }
+    // /* 输出所有全局变量 */
+    // char all[1024];
+    // int len = syscall_get_all_var(all, sizeof(all));
+    // printf("%s", all);
+    return 0;
+}
+
+/* 内建指令 unset 实现 */
+int unset(int argc, char **argv, int global_shell_id) {
+    if (argc < 2) {
+        printf("unset: missing variable name\n");
+        return 1;
+    }
+    int ret = syscall_unset_var(argv[1], global_shell_id);
+    if (ret != 0) {
+        printf("unset: failed to remove variable %s\n", argv[1]);
+        return 1;
+    }
+    return 0;
+}
+
 void runcmd(char *s) {
 	gettoken(s, 0);
 
@@ -288,6 +424,9 @@ void runcmd(char *s) {
 		return;
 	}
 	argv[argc] = 0;
+
+	/* 对参数进行变量展开 */
+    expand_argv(argc, argv);
 
 	// 对于内建指令
 	// printf("do incmd argc: %d\n", argc);
@@ -304,10 +443,33 @@ void runcmd(char *s) {
 				return;
 			}
 			return;
-		}
-	}
+		} else if (strcmp(argv[0], "declare") == 0) {
+            if ((r = declare(argc, argv, global_shell_id)) != 0) {
+                return;
+            }
+            return;
+        } else if (strcmp(argv[0], "unset") == 0) {
+            if ((r = unset(argc, argv, global_shell_id)) != 0) {
+                return;
+            }
+            return;
+        }
+    }
 
 	int child = spawn(argv[0], argv);
+	if (child < 0) {
+        char cmd[1024];
+        int len = strlen(argv[0]);
+        strcpy(cmd, argv[0]);
+        if (len >= 2 && cmd[len - 2] == '.' && cmd[len - 1] == 'b') {
+            cmd[len - 2] = '\0';
+        } else {
+            cmd[len] = '.';
+            cmd[len + 1] = 'b';
+            cmd[len + 2] = '\0';
+        }
+        child = spawn(cmd, argv);
+    }
 	close_all();
 	if (child >= 0) {
 		wait(child);
@@ -372,9 +534,10 @@ int main(int argc, char **argv) {
 	int r;
 	int interactive = iscons(0);
 	int echocmds = 0;
+
 	printf("\n:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\n");
 	printf("::                                                         ::\n");
-	printf("::                     MOS Shell 2024                      ::\n");
+	printf("::                     MOS Shell 2025                      ::\n");
 	printf("::                                                         ::\n");
 	printf(":::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\n");
 	ARGBEGIN {
@@ -402,6 +565,9 @@ int main(int argc, char **argv) {
 		}
 		user_assert(r == 0);
 	}
+
+	global_shell_id = syscall_alloc_shell_id();
+
 	for (;;) {
 		if (interactive) {
 			printf("\n$ ");
@@ -416,9 +582,11 @@ int main(int argc, char **argv) {
 		}
 		// 根据 buf 的起始判断是否为内建命令 exit、cd 或 pwd
         if (startswith(buf, "exit")) {
+			exit();
             break; // 直接退出循环
         }
-        if (startswith(buf, "cd") || startswith(buf, "pwd")) {
+        if (startswith(buf, "cd") || startswith(buf, "pwd") 
+			|| startswith(buf, "declare") || startswith(buf, "unset")) {
             runcmd(buf);
             continue;
         }

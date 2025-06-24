@@ -70,7 +70,11 @@ int syscall_write_dev(void *va, u_int dev, u_int len);
 int syscall_read_dev(void *va, u_int dev, u_int len);
 int syscall_set_cur_path(char *path);
 int syscall_get_cur_path(char *buf);
-
+int syscall_declare_var(const char *name, const char *value, int perm, int caller_shell_id);
+int syscall_unset_var(const char *name, int caller_shell_id);
+int syscall_get_var(const char *name, char *value, int bufsize);
+int syscall_get_all_var(char *buf, int bufsize);
+int syscall_alloc_shell_id(void);
 
 // ipc.c
 void ipc_send(u_int whom, u_int val, const void *srcva, u_int perm);
@@ -125,7 +129,6 @@ int sync(void);
 int create(const char *path, u_int type);
 
 // path.c
-// ...existing declarations...
 int chdir(char *path);
 int getcwd(char *buf);
 void pathcat(char *path, const char *suffix);

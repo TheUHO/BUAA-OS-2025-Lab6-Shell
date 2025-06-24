@@ -250,6 +250,9 @@ int sys_exofork(void) {
 	/* Exercise 4.9: Your code here. (4/4) */
 	e->env_status = ENV_NOT_RUNNABLE;
 	e->env_pri = curenv->env_pri;
+	e->env_shell_id = curenv->env_shell_id;
+	env_copy_vars(e, curenv);
+
 	return e->env_id;
 }
 
@@ -537,6 +540,32 @@ int sys_set_cur_path(char *path) {
     return 0;
 }
 
+/* 分配一个新的 shell id，并保存到当前进程环境中 */
+int sys_alloc_shell_id(void) {
+    static int next_shell_id = 1;
+    int id = next_shell_id++;
+    curenv->env_shell_id = id;
+    printk("sys_alloc_shell_id: allocated shell id %d\n", id);
+    return id;
+}
+
+/* 声明或更新变量系统调用 */
+int sys_declare_var(const char *name, const char *value, int perm, int caller_shell_id) {
+    return envvar_declare(curenv, name, value, perm, caller_shell_id);
+}
+
+int sys_unset_var(const char *name, int caller_shell_id) {
+    return envvar_unset(curenv, name);
+}
+
+int sys_get_var(const char *name, char *value, int bufsize) {
+    return envvar_get(curenv, name, value, bufsize);
+}
+
+int sys_get_all_var(char *buf, int bufsize) {
+    return envvar_getall(curenv, buf, bufsize);
+}
+
 void *syscall_table[MAX_SYSNO] = {
     [SYS_putchar] = sys_putchar,
     [SYS_print_cons] = sys_print_cons,
@@ -558,6 +587,11 @@ void *syscall_table[MAX_SYSNO] = {
     [SYS_read_dev] = sys_read_dev,
 	[SYS_get_cur_path] = sys_get_cur_path,
 	[SYS_set_cur_path] = sys_set_cur_path,
+	[SYS_alloc_shell_id] = sys_alloc_shell_id,
+	[SYS_declare_var] = sys_declare_var,
+	[SYS_unset_var] = sys_unset_var,
+	[SYS_get_var] = sys_get_var,
+	[SYS_get_all_var] = sys_get_all_var,
 };
 
 /* Overview:

@@ -572,3 +572,148 @@ void envid2env_check() {
 	assert(re == -E_BAD_ENV);
 	printk("envid2env() work well!\n");
 }
+
+/* ---------------- 环境变量支持开始 ---------------- */
+#define MAX_VAR_COUNT 128
+static struct Var var_pool[MAX_VAR_COUNT];
+static int var_pool_used[MAX_VAR_COUNT] = {0};
+
+/* 分配一个 Var 节点 */
+static struct Var *alloc_var(void) {
+    for (int i = 0; i < MAX_VAR_COUNT; i++) {
+        if (!var_pool_used[i]) {
+            var_pool_used[i] = 1;
+            var_pool[i].name[0] = '\0';
+            var_pool[i].value[0] = '\0';
+            var_pool[i].perm = 0;
+            var_pool[i].owner = 0;
+            var_pool[i].next = 0;
+            return &var_pool[i];
+        }
+    }
+    return 0;
+}
+
+/* 释放一个 Var 节点 */
+static void free_var(struct Var *v) {
+    int index = v - var_pool;
+    if (index >= 0 && index < MAX_VAR_COUNT)
+        var_pool_used[index] = 0;
+}
+
+/* envvar_declare: 在指定 env->env_vars 链表中，声明或更新变量
+   参数 caller_shell_id 用于设置 owner（全局变量 owner==0，否则 owner==caller_shell_id）
+*/
+int envvar_declare(struct Env *env, const char *name, const char *value, int perm, int caller_shell_id) {
+    if (!name || strlen(name) > MAX_VAR_NAME || (value && strlen(value) > MAX_VAR_VALUE))
+        return -E_INVAL;
+    struct Var *v = env->env_vars;
+    while (v) {
+        if (strcmp(v->name, name) == 0) {
+            if (v->perm == 1)
+                return -E_PERM;
+            strcpy(v->value, value ? value : "");
+            v->perm = perm;
+            return 0;
+        }
+        v = v->next;
+    }
+    v = alloc_var();
+    if (!v)
+        return -E_NO_MEM;
+    strcpy(v->name, name);
+    strcpy(v->value, value ? value : "");
+    v->perm = perm;
+    v->owner = caller_shell_id;
+    v->next = env->env_vars;
+    env->env_vars = v;
+    printk("envvar_declare: declared %s=%s, perm=%d, owner=%d\n", v->name, v->value, v->perm, v->owner);
+    return 0;
+}
+
+/* envvar_unset: 从 env->env_vars 链表中删除变量 */
+int envvar_unset(struct Env *env, const char *name) {
+    struct Var **pp = &env->env_vars;
+    while (*pp) {
+        struct Var *v = *pp;
+        if (strcmp(v->name, name) == 0) {
+            if (v->perm == 1)
+                return -E_PERM;
+            *pp = v->next;
+            free_var(v);
+            // printk("envvar_unset: unset %s\n", name);
+            return 0;
+        }
+        pp = &v->next;
+    }
+    return -E_NOT_FOUND;
+}
+
+/* envvar_get: 从 env->env_vars 中查找变量，并复制其 value */
+int envvar_get(struct Env *env, const char *name, char *value, int bufsize) {
+    struct Var *v = env->env_vars;
+    while (v) {
+		// printk("name: %s %s\n", v->name, name);
+		// printk("value init: %s %s\n", value, v->value);
+		// printk("owner: %d, env_shell_id: %d\n", v->owner, env->env_shell_id);
+        if (strcmp(v->name, name) == 0 && ((v->owner == 0) || (v->owner == env->env_shell_id))) {
+			// printk("name: %s %s\n", v->name, name);
+			// printk("value start: %s %s\n", value, v->value);
+			int len = strlen(v->value);
+            if (len >= bufsize)
+                len = bufsize - 1;
+			value[0] = '\0';
+            strcpy(value, v->value);
+			value[len] = '\0';
+            return 0;
+        }
+        v = v->next;
+    }
+    return -E_NOT_FOUND;
+}
+
+/* envvar_getall: 将 env->env_vars 的所有变量以 "name=value\n" 格式写入 buf */
+int envvar_getall(struct Env *env, char *buf, int bufsize) {
+    int len = 0;
+    struct Var *v = env->env_vars;
+    while(v) {
+        int n = strlen(v->name);
+        int m = strlen(v->value);
+        int needed = n + 1 + m + 1; // "name=value\n"
+        if(len + needed >= bufsize)
+            break;
+        strcpy(buf + len, v->name);
+        len += n;
+        strcpy(buf + len, "=");
+        len += 1;
+        strcpy(buf + len, v->value);
+        len += m;
+        strcpy(buf + len, "\n");
+        len += 1;
+        v = v->next;
+    }
+    if(len < bufsize)
+        buf[len] = '\0';
+    return len;
+}
+
+/* 当父进程创建子进程时，仅复制父进程中全局变量和局部变量到子进程 */
+void env_copy_vars(struct Env *child, struct Env *parent) {
+    child->env_vars = 0;
+    struct Var *p = parent->env_vars;
+    while (p) {
+        if (p->owner == 0 || p->owner == parent->env_shell_id) {  
+			// 仅复制全局变量和父进程的局部变量
+            struct Var *node = alloc_var();
+            if(!node)
+                break;
+            strcpy(node->name, p->name);
+            strcpy(node->value, p->value);
+            node->perm = p->perm;
+            node->owner = p->owner;
+            node->next = child->env_vars;
+            child->env_vars = node;
+        }
+        p = p->next;
+    }
+}
