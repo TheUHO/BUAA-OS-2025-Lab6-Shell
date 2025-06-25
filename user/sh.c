@@ -4,6 +4,13 @@
 #define WHITESPACE " \t\r\n"
 #define SYMBOLS "<|>&;()"
 
+#define HISTFILESIZE 20
+
+int hist = 0;               // 当前写入位置
+char histcmd[HISTFILESIZE][1024] = {0};
+int lasthist = -1;          // 用于 Up/Down 调用时当前历史指令的索引
+char lastcmd[1024] = {0};   // 用于暂存当前未提交指令
+
 int global_shell_id;
 
 /* Overview:
@@ -117,6 +124,47 @@ void expand_argv(int argc, char **argv) {
 			// printf("expand: %s\n", expanded);
         }
     }
+}
+
+/* 将当前指令 buf 写入历史缓冲区，并刷新至 .mos_history 文件 */
+void write_history(const char *buf) {
+    // 检查空行（只包含空白字符时不写入）
+    int tmpflag = 0;
+    for (int i = 0; buf[i]; i++) {
+        if (buf[i] != ' ' && buf[i] != '\t' && buf[i] != '\r' && buf[i] != '\n') {
+            tmpflag = 1;
+            break;
+        }
+    }
+    if (!tmpflag) {
+		return;
+	}
+    // 保存到内存中的循环历史数组
+    strcpy(histcmd[hist], buf);
+    // 在内存中存储时在末尾添加换行符
+    int len = strlen(buf);
+    if (len < 1023) {
+        histcmd[hist][len] = '\n';
+        histcmd[hist][len + 1] = '\0';
+    }
+    hist = (hist + 1) % HISTFILESIZE;
+    // 重置历史切换的索引
+    lasthist = -1;
+    
+    // 将所有历史指令写入 /.mos_history 文件
+    int fd = open("/.mos_history", O_RDWR);
+    if (fd < 0) {
+        fd = open("/.mos_history", O_CREAT);
+    }
+    // 所有历史命令依次写入（从 hist 索引开始写，循环写入 HISTFILESIZE 条记录）
+    ftruncate(fd, 0); // 清空文件
+    for (int i = 0; i < HISTFILESIZE; i++) {
+        int idx = (hist + i) % HISTFILESIZE;
+        if (histcmd[idx][0] != '\0') {
+            write(fd, histcmd[idx], strlen(histcmd[idx]));
+        }
+    }
+    close(fd);
 }
 
 #define MAXARGS 128
@@ -386,7 +434,7 @@ int declare(int argc, char **argv, int global_shell_id) {
         strncpy(name, arg, MAX_VAR_NAME);
     }
     int caller = export_flag ? 0 : global_shell_id;
-	printf("name: %s, value: %s, caller: %d\n", name, value, caller);
+	// printf("name: %s, value: %s, caller: %d\n", name, value, caller);
 	int ret = syscall_declare_var(name, value, perm, caller);
     if (ret != 0) {
         printf("declare: failed to declare variable %s\n", name);
@@ -411,6 +459,22 @@ int unset(int argc, char **argv, int global_shell_id) {
         return 1;
     }
     return 0;
+}
+
+/* 执行命令的内建指令 history 实现 */
+void history() {
+    int fd = open("/.mos_history", O_RDONLY);
+    if (fd < 0) {
+        debugf("cannot open /.mos_history\n");
+        return;
+    }
+    char history_buf[4096];
+    int n = read(fd, history_buf, sizeof(history_buf) - 1);
+    if (n >= 0) {
+        history_buf[n] = '\0';
+        printf("%s", history_buf);
+    }
+    close(fd);
 }
 
 void runcmd(char *s) {
@@ -453,7 +517,10 @@ void runcmd(char *s) {
                 return;
             }
             return;
-        }
+        } else if (strcmp(argv[0], "history") == 0) {
+			history();
+			return;
+    	}
     }
 
 	int child = spawn(argv[0], argv);
@@ -482,35 +549,231 @@ void runcmd(char *s) {
 	exit();
 }
 
+void flushline(int i, int len) {
+	if (i != 0) { 
+		printf("\033[%dD", i); 
+	}
+	for (int j = 0; j < len; j++) {
+		printf(" ");
+	}
+	if (len != 0) {
+		printf("\033[%dD", len);
+	}
+}
+
 void readline(char *buf, u_int n) {
-	int r;
-	for (int i = 0; i < n; i++) {
-		if ((r = read(0, buf + i, 1)) != 1) {
-			if (r < 0) {
-				debugf("read error: %d\n", r);
+    int i = 0;      // 当前光标位置
+    int len = 0;    // 缓冲区中有效字符数
+    int r;
+    char ch, temp;
+    buf[0] = '\0';
+    while (1) {
+        if ((r = read(0, &ch, 1)) != 1) {
+            if (r < 0) {
+                debugf("read error: %d\n", r);
+            }
+            exit();
+        }
+        // 回车结束输入
+        if (ch == '\r' || ch == '\n') {
+            buf[len] = '\0';
+            printf("\n");
+            return;
+        }
+		// 处理 Ctrl-A: 跳至行首
+        if(ch == 1) {
+            if(i > 0) {
+                printf("\033[%dD", i);  // 向左移动 i 个字符
+                i = 0;
+            }
+            continue;
+        }
+        // 处理 Ctrl-E: 跳至行尾
+        if(ch == 5) {
+            if(i < len) {
+                printf("\033[%dC", len - i); // 向右移动至行尾
+                i = len;
+            }
+            continue;
+        }
+        // 处理 Ctrl-K: 删除从当前光标位置到行尾
+		if(ch == 11) {
+			int num = len - i;  // 需要删除的字符数
+			// 用空格覆盖从光标到行尾的字符
+			for (int j = 0; j < num; j++) {
+				printf(" ");
 			}
-			exit();
+			// 将光标向左移动覆盖的字符数，使光标回到原位
+			printf("\033[%dD", num);
+			buf[i] = '\0';
+			len = i;
+			continue;
 		}
-		if (buf[i] == '\b' || buf[i] == 0x7f) {
-			if (i > 0) {
-				i -= 2;
-			} else {
-				i = -1;
+        // 处理 Ctrl-U: 删除从行首到当前光标前的所有字符
+		if(ch == 21) {
+			flushline(i, len);
+			// 使用循环将当前位置 i 后面的字符复制到 buf 开头
+			for (int j = 0; j <= len - i; j++) {
+				buf[j] = buf[i + j];
 			}
-			if (buf[i] != '\b') {
-				printf("\b");
+			len = len - i;
+			i = 0;
+			// 重新输出修改后的行
+			buf[len] = '\0';
+			printf("%s", buf);
+			if (len > 0) {
+				printf("\033[%dD", len);
 			}
+			continue;
 		}
-		if (buf[i] == '\r' || buf[i] == '\n') {
-			buf[i] = 0;
-			return;
+        // 处理 Ctrl-W: 删除光标左侧最近一个单词
+		if(ch == 23) {
+			if(i == 0)
+				continue;
+			flushline(i, len);
+			int pos = i;
+			// 先跳过左侧的空白字符
+			while(pos > 0 && (buf[pos-1]==' ' || buf[pos-1]=='\t'))
+				pos--;
+			// 再删除连续非空白字符
+			while(pos > 0 && (buf[pos-1] != ' ' && buf[pos-1] != '\t'))
+				pos--;
+			int numDeleted = i - pos;
+			// 使用循环将 buf[i...] 移到 buf[pos...]
+			for (int j = 0; j <= len - i; j++) {
+				buf[pos + j] = buf[i + j];
+			}
+			len -= numDeleted;
+			i = pos;
+			// 重新输出
+			printf("%s", buf);
+			// 将光标调回到正确位置
+			if(len - i > 0)
+				printf("\033[%dD", len - i);
+			continue;
 		}
-	}
-	debugf("line too long\n");
-	while ((r = read(0, buf, 1)) == 1 && buf[0] != '\r' && buf[0] != '\n') {
-		;
-	}
-	buf[0] = 0;
+        // 处理 ESC 开头的控制序列 (方向键)
+        if (ch == 27) {
+            if (read(0, &temp, 1) != 1)
+                continue;
+            if (temp == '[') {
+                if (read(0, &temp, 1) != 1)
+                    continue;
+                if (temp == 'D') { // 左箭头
+                    if (i > 0) {
+                        i--;
+                    } else {
+						printf("\033[C"); // 光标右移
+					}
+                } else if (temp == 'C') { // 右箭头
+                    if (i < len) {
+                        i++;
+                    } else {
+						printf("\033[D"); // 光标左移
+					}
+                } else if (temp == 'A') { // 上箭头
+					printf("\033[B");
+					flushline(i, len);
+					// 如果尚未开始切换历史，则先保存当前输入到 lastcmd
+					if(lasthist == -1) {
+						buf[len] = '\0';
+						strcpy(lastcmd, buf);
+					}
+					if (lasthist == -1) {
+						if (hist == 0) {
+							if (strcmp(histcmd[HISTFILESIZE - 1], "") != 0) {
+								lasthist = (hist + HISTFILESIZE - 1) % HISTFILESIZE;
+							} else {
+								lasthist = 0; // 已是最前，不变
+							}
+						} else {
+							lasthist = (hist + HISTFILESIZE - 1) % HISTFILESIZE;
+						}
+					} else {
+						if (lasthist == 0 && strcmp(histcmd[HISTFILESIZE - 1], "") == 0)
+							; // 已是最前，不变
+						else if (lasthist == hist) {
+							; // 已是最前，不变
+						} else {
+							lasthist = (lasthist + HISTFILESIZE - 1) % HISTFILESIZE;
+						}
+					}
+					strcpy(buf, histcmd[lasthist]);
+					if(buf[strlen(buf)-1]=='\n'){
+						buf[strlen(buf)-1]='\0';
+					}
+					i = strlen(buf);
+					len = i;
+					printf("%s", buf);
+					continue;
+				} else if (temp == 'B') { // 下箭头
+					flushline(i, len);
+					if (lasthist == -1) {
+						buf[len] = '\0';
+						strcpy(lastcmd, buf);
+						i = strlen(buf);
+						len = i;
+						printf("%s", buf);
+						continue;
+					} else {
+						if (lasthist == ((hist + HISTFILESIZE - 1) % HISTFILESIZE) || strcmp(histcmd[(lasthist + 1) % HISTFILESIZE], "") == 0) { // 已是最新历史
+							lasthist = -1; // 回到当前输入
+							strcpy(buf, lastcmd);
+							i = strlen(buf);
+							len = i;
+							printf("%s", buf);
+							continue;
+						} else {
+							lasthist = (lasthist + 1) % HISTFILESIZE;
+						}
+					}
+					strcpy(buf, histcmd[lasthist]);
+					if(buf[strlen(buf)-1]=='\n'){
+						buf[strlen(buf)-1]='\0';
+					}
+					i = strlen(buf);
+					len = i;
+					printf("%s", buf);
+					continue;
+				}
+            }
+            continue;
+        }
+        // 处理 Backspace (ASCII 127)
+        if (ch == 127) {
+            if (i <= 0)
+                continue;  // 已在最左侧
+            i--;      // 光标左移一位
+            len--;    // 总字符数减少
+            // 手动将光标位置后面的字符前移一位
+            for (int j = i; j < len; j++) {
+                buf[j] = buf[j+1];
+            }
+            buf[len] = '\0';
+            // 重新显示从当前位置开始的完整字符串，覆盖原有显示：
+            // 先将光标移到行首，再输出从当前位置到末尾的字符串，后面再追加空格
+            printf("\033[%dD", i + 1);
+            printf("%s ", buf);
+            // 移动光标回到原来的位置
+            printf("\033[%dD", (len - i + 1));
+            continue;
+        }
+       
+        if (len < (int)n - 1) { // 普通字符插入处理
+			// 将光标当前位置之后的字符向后移动1位
+			for (int j = len; j >= i; j--) {
+                buf[j+1] = buf[j];
+            }
+			buf[i] = ch;
+			len++;
+			printf("\033[%dD", i + 1);
+			printf("%s", buf);
+			if ((r = len - i - 1) != 0) {
+				printf("\033[%dD", r);
+			}
+			i++;
+        }
+    }
 }
 
 char buf[1024];
@@ -574,6 +837,8 @@ int main(int argc, char **argv) {
 		}
 		readline(buf, sizeof buf);
 
+		write_history(buf); // 保存历史指令到.mos-history
+
 		if (buf[0] == '#') {
 			continue;
 		}
@@ -586,7 +851,8 @@ int main(int argc, char **argv) {
             break; // 直接退出循环
         }
         if (startswith(buf, "cd") || startswith(buf, "pwd") 
-			|| startswith(buf, "declare") || startswith(buf, "unset")) {
+			|| startswith(buf, "declare") || startswith(buf, "unset")
+			|| startswith(buf, "history")) {
             runcmd(buf);
             continue;
         }
