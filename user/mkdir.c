@@ -42,6 +42,11 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    int len = strlen(path);
+    while (len > 0 && strchr(" \t\r\n", path[len - 1])) {
+        path[--len] = '\0';
+    }
+
     // 如果目录或文件已经存在
     if ((r = dir_exists(path)) != 0) {
         printf("mkdir: cannot create directory '%s': File exists\n", path);

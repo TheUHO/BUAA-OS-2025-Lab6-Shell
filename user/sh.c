@@ -5,14 +5,65 @@
 #define SYMBOLS "<|>&;()"
 
 #define HISTFILESIZE 20
-
-int hist = 0;               // 当前写入位置
-char histcmd[HISTFILESIZE][1024] = {0};
-int lasthist = -1;          // 用于 Up/Down 调用时当前历史指令的索引
-char lastcmd[1024] = {0};   // 用于暂存当前未提交指令
+char histcmd[HISTFILESIZE][1024] = {{0}};
+int hist_latest = 0; // Index to write the *next* command
+int hist_count = 0;  // Total number of commands in history
 
 int global_shell_id;
 
+
+void runcmd(char *);
+static void strncpy(char *, const char *, int);
+
+int process_backquote(const char *s, char *output, int outsize, int *consumed) {
+    // s[0] 应为反引号 '`'，查找匹配的结束反引号
+    const char *start = s + 1;
+    const char *closing = strchr(start, '`');
+    if (closing == NULL) {
+        return -1;  // 未找到匹配的反引号
+    }
+    int cmd_len = closing - start;  // 反引号中命令的长度
+
+    char cmd[1024];
+    if (cmd_len >= (int)sizeof(cmd)) {
+        cmd_len = sizeof(cmd) - 1;
+    }
+    // 提取反引号中的命令内容
+    strncpy(cmd, start, cmd_len + 1);
+    cmd[cmd_len] = '\0';
+    // printf("sub_cmd: %s\n", cmd);
+    // 创建管道，用于捕获子命令的标准输出
+    int p[2];
+    if (pipe(p) < 0) {
+        return -1;
+    }
+    int pid = fork();
+    if (pid < 0) {
+        return -1;
+    }
+    if (pid == 0) {
+        // --- 子进程 ---
+        // 重定向标准输出到管道写端
+        dup(p[1],1);
+        close(p[0]);
+        close(p[1]);
+        runcmd(cmd);
+        exit();
+    } else {
+        // --- 父进程 ---
+        close(p[1]);
+        int pos = 0, n;
+        while ((n = read(p[0], output + pos, 1024)) > 0) {
+            pos += n;
+        }
+        output[pos] = '\0';
+        // printf("output: %s\n", output);
+        close(p[0]);
+        wait(pid);
+    }
+    *consumed = (closing - s) + 1;  // 包括起始和结束反引号
+    return 0;
+}
 /* Overview:
  *   Parse the next token from the string at s.
  *
@@ -42,6 +93,15 @@ int _gettoken(char *s, char **p1, char **p2) {
 		return 0;
 	}
 
+    // 检查是否为追加重定向 ">>"
+    if (*s == '>' && *(s + 1) == '>') {
+        *p1 = s;
+        s[0] = '\0'; // 将 ">>" 所在位置用空字符截断
+        s[1] = '\0';
+        *p2 = s + 2; // p2 指向 ">>" 之后的位置
+        return '+'; 
+    }
+
 	if (strchr(SYMBOLS, *s)) {
 		int t = *s;
 		*p1 = s;
@@ -50,9 +110,37 @@ int _gettoken(char *s, char **p1, char **p2) {
 		return t;
 	}
 
+    // 如果遇到注释符 '#'，则将 '#' 后直到行末的部分视为注释，返回 '#' token
+    if (*s == '#') {
+        *p1 = s;
+        while (*s && *s != '\n') {
+            s++;
+        }
+        *p2 = s;
+        return '#';
+    }
+
 	*p1 = s;
 	while (*s && !strchr(WHITESPACE SYMBOLS, *s)) {
-		s++;
+        if (*s == '`') {
+            int consumed = 0;
+            char substitution[1024] = {0};
+            if (process_backquote(s, substitution, sizeof(substitution), &consumed) != 0) {
+                debugf("Syntax error: unmatched backquote.\n");
+                return -1;
+            }
+            // 保存反引号之后的剩余部分
+            char remainder[1024] = {0};
+            strcpy(remainder, s + consumed);
+            // 用 substitution 覆盖当前反引号表达式部分
+            strcpy(s, substitution);
+            // 将 remainder 接到 substitution 后面
+            strcpy(s + strlen(substitution), remainder);
+            // s 指针向后推进 substitution 部分的长度后继续解析
+            s += strlen(substitution);
+            continue;  // 继续判断下一个字符
+        }
+        s++;
 	}
 	*p2 = s;
 	return 'w';
@@ -128,43 +216,36 @@ void expand_argv(int argc, char **argv) {
 
 /* 将当前指令 buf 写入历史缓冲区，并刷新至 .mos_history 文件 */
 void write_history(const char *buf) {
-    // 检查空行（只包含空白字符时不写入）
-    int tmpflag = 0;
-    for (int i = 0; buf[i]; i++) {
-        if (buf[i] != ' ' && buf[i] != '\t' && buf[i] != '\r' && buf[i] != '\n') {
-            tmpflag = 1;
-            break;
-        }
-    }
-    if (!tmpflag) {
+	int is_whitespace = 1;
+	for (int i = 0; buf[i]; i++) {
+		if (!strchr(WHITESPACE, buf[i])) {
+			is_whitespace = 0;
+			break;
+		}
+	}
+	if (is_whitespace) {
 		return;
 	}
-    // 保存到内存中的循环历史数组
-    strcpy(histcmd[hist], buf);
-    // 在内存中存储时在末尾添加换行符
-    int len = strlen(buf);
-    if (len < 1023) {
-        histcmd[hist][len] = '\n';
-        histcmd[hist][len + 1] = '\0';
-    }
-    hist = (hist + 1) % HISTFILESIZE;
-    // 重置历史切换的索引
-    lasthist = -1;
-    
-    // 将所有历史指令写入 /.mos_history 文件
-    int fd = open("/.mos_history", O_RDWR);
-    if (fd < 0) {
-        fd = open("/.mos_history", O_CREAT);
-    }
-    // 所有历史命令依次写入（从 hist 索引开始写，循环写入 HISTFILESIZE 条记录）
-    ftruncate(fd, 0); // 清空文件
-    for (int i = 0; i < HISTFILESIZE; i++) {
-        int idx = (hist + i) % HISTFILESIZE;
-        if (histcmd[idx][0] != '\0') {
-            write(fd, histcmd[idx], strlen(histcmd[idx]));
-        }
-    }
-    close(fd);
+
+	strcpy(histcmd[hist_latest], buf);
+	hist_latest = (hist_latest + 1) % HISTFILESIZE;
+	if (hist_count < HISTFILESIZE) {
+		hist_count++;
+	}
+
+	int fd = open("/.mos_history", O_CREAT | O_WRONLY | O_TRUNC);
+	if (fd < 0) {
+		return;
+	}
+
+	for (int i = 0; i < hist_count; i++) {
+		int idx = (hist_latest - hist_count + i + HISTFILESIZE) % HISTFILESIZE;
+		if (histcmd[idx][0] != '\0') {
+			write(fd, histcmd[idx], strlen(histcmd[idx]));
+			write(fd, "\n", 1);
+		}
+	}
+	close(fd);
 }
 
 #define MAXARGS 128
@@ -178,6 +259,8 @@ int parsecmd(char **argv, int *rightpipe) {
 		switch (c) {
 		case 0:
 			return argc;
+		case '#':
+			return argc; // 注释
 		case 'w':
 			if (argc >= MAXARGS) {
 				debugf("too many arguments\n");
@@ -226,6 +309,46 @@ int parsecmd(char **argv, int *rightpipe) {
 			// user_panic("> redirection not implemented");
 
 			break;
+        case ';':
+            if ((r = fork()) < 0) {
+                debugf("fork: %d\n", r);
+                exit();
+            }
+            *rightpipe = r;
+            if (r == 0) {
+                return argc;
+            } else {
+                wait(r);
+                return parsecmd(argv, rightpipe);
+            }
+            break;
+
+        case '+':
+            if (gettoken(0, &t) != 'w') {
+                debugf("syntax error: >> not followed by word\n");
+                exit();
+            }
+            // 以只写方式打开文件；如果文件不存在，则创建它
+            if ((fd = open(t, O_WRONLY | O_CREAT)) < 0) {
+                debugf("open %s for append: %d\n", t, fd);
+                exit();
+            }
+            // 将文件指针移动到文件末尾以实现追加
+            // 1. 从文件描述符数字获取 Fd 结构体指针
+            struct Fd *fd_struct;
+            if ((r = fd_lookup(fd, &fd_struct)) < 0) {
+                debugf("fd_lookup error for fd %d: %d\n", fd, r);
+                exit();
+            }
+            // 2. 将 Fd 结构体转换为 Filefd 结构体以访问文件元数据
+            struct Filefd *ffd = (struct Filefd *)fd_struct;
+            // 3. 将文件描述符的偏移量设置为文件大小，实现追加效果
+            fd_struct->fd_offset = ffd->f_file.f_size;
+            // 将标准输出重定向到该文件
+            dup(fd, 1);
+            close(fd);
+            break;
+
 		case '|':;
 			/*
 			 * First, allocate a pipe.
@@ -549,229 +672,221 @@ void runcmd(char *s) {
 	exit();
 }
 
-void flushline(int i, int len) {
-	if (i != 0) { 
-		printf("\033[%dD", i); 
-	}
-	for (int j = 0; j < len; j++) {
-		printf(" ");
-	}
-	if (len != 0) {
-		printf("\033[%dD", len);
-	}
+void *memmove(void *dest, const void *src, size_t n) {
+    char *d = dest;
+    const char *s = src;
+
+    if (d == s) {
+        return d;
+    }
+
+    if (d < s) {
+        for (size_t i = 0; i < n; i++) {
+            d[i] = s[i];
+        }
+    } else {
+        for (size_t i = n; i > 0; i--) {
+            d[i - 1] = s[i - 1];
+        }
+    }
+    return dest;
+}
+
+void refresh_line(const char *prompt, char *buf, int len, int cursor_pos) {
+    // 1. 移动光标到行首
+    printf("\r");
+    // 2. 输出提示符
+    printf("%s", prompt);
+    // 3. 输出整个缓冲区内容
+    printf("%s", buf);
+    // 4. 清除光标后多余的旧字符（防止之前更长行残留）
+    printf("\x1b[K");
+    // 5. 将光标移回到正确的位置（提示符长度 + 当前光标位置）
+    printf("\r\x1b[%dC", (int)strlen(prompt) + cursor_pos);
 }
 
 void readline(char *buf, u_int n) {
-    int i = 0;      // 当前光标位置
-    int len = 0;    // 缓冲区中有效字符数
-    int r;
-    char ch, temp;
+    int i = 0;             // 当前光标位置（在 buf 内索引）
+    int len = 0;           // 当前缓冲区有效字符长度
+    int hist_nav_idx = -1; // -1 表示当前未处于历史记录浏览模式，否则表示历史数组 histcmd 的索引
+    char lastcmd[1024] = {0}; // 用于保存开始浏览历史前当前输入的内容
+    char ch;
+    const char *prompt = "$ "; // 提示符
+
+    // 清空输入缓冲区
     buf[0] = '\0';
+
     while (1) {
-        if ((r = read(0, &ch, 1)) != 1) {
-            if (r < 0) {
-                debugf("read error: %d\n", r);
-            }
+        int r = read(0, &ch, 1);
+        if (r < 1) {
             exit();
         }
-        // 回车结束输入
-        if (ch == '\r' || ch == '\n') {
+
+        switch (ch) {
+        // 回车或换行结束输入
+        case '\r':
+        case '\n':
             buf[len] = '\0';
             printf("\n");
             return;
-        }
-		// 处理 Ctrl-A: 跳至行首
-        if(ch == 1) {
-            if(i > 0) {
-                printf("\033[%dD", i);  // 向左移动 i 个字符
+
+        // Ctrl-A: 移动光标到行首 (ASCII 1)
+        case 1:
+            if (i > 0) {
                 i = 0;
+                refresh_line(prompt, buf, len, i);
             }
-            continue;
-        }
-        // 处理 Ctrl-E: 跳至行尾
-        if(ch == 5) {
-            if(i < len) {
-                printf("\033[%dC", len - i); // 向右移动至行尾
+            break;
+
+        // Ctrl-E: 移动光标到行尾 (ASCII 5)
+        case 5:
+            if (i < len) {
                 i = len;
+                refresh_line(prompt, buf, len, i);
             }
-            continue;
+            break;
+
+		// Ctrl-K: 删除从当前光标位置到行尾 (ASCII 11)
+		case 11: 
+			if (i < len) {
+				buf[i] = '\0';
+				len = i;
+				refresh_line(prompt, buf, len, i);
+			}
+			break;
+
+		// Ctrl-U: 删除从行首到当前光标前的所有字符 (ASCII 21)
+		case 21: 
+			if (i > 0) {
+				memmove(&buf[0], &buf[i], len - i + 1);
+				len -= i;
+				i = 0;
+				refresh_line(prompt, buf, len, i);
+			}
+			break;
+		
+        // Ctrl-W: 删除光标左侧最近一个单词 (ASCII 23)
+        case 23: {
+            if (i > 0) {
+                int end_pos = i;
+                int start_pos = i;
+                // 先向左跳过空白字符
+                while (start_pos > 0 && strchr(WHITESPACE, buf[start_pos - 1])) {
+                    start_pos--;
+                }
+                // 再向左删除连续非空白字符
+                while (start_pos > 0 && !strchr(WHITESPACE, buf[start_pos - 1])) {
+                    start_pos--;
+                }
+                // 删除的字符个数
+                int numDeleted = i - start_pos;
+                // 使用 memmove 将 buf[i...] 向前覆盖删除的区域
+                memmove(&buf[start_pos], &buf[end_pos], len - end_pos + 1); // 包括结束符
+                len -= numDeleted;
+                i = start_pos;
+                refresh_line(prompt, buf, len, i);
+            }
+            break;
         }
-        // 处理 Ctrl-K: 删除从当前光标位置到行尾
-		if(ch == 11) {
-			int num = len - i;  // 需要删除的字符数
-			// 用空格覆盖从光标到行尾的字符
-			for (int j = 0; j < num; j++) {
-				printf(" ");
-			}
-			// 将光标向左移动覆盖的字符数，使光标回到原位
-			printf("\033[%dD", num);
-			buf[i] = '\0';
-			len = i;
-			continue;
-		}
-        // 处理 Ctrl-U: 删除从行首到当前光标前的所有字符
-		if(ch == 21) {
-			flushline(i, len);
-			// 使用循环将当前位置 i 后面的字符复制到 buf 开头
-			for (int j = 0; j <= len - i; j++) {
-				buf[j] = buf[i + j];
-			}
-			len = len - i;
-			i = 0;
-			// 重新输出修改后的行
-			buf[len] = '\0';
-			printf("%s", buf);
-			if (len > 0) {
-				printf("\033[%dD", len);
-			}
-			continue;
-		}
-        // 处理 Ctrl-W: 删除光标左侧最近一个单词
-		if(ch == 23) {
-			if(i == 0)
-				continue;
-			flushline(i, len);
-			int pos = i;
-			// 先跳过左侧的空白字符
-			while(pos > 0 && (buf[pos-1]==' ' || buf[pos-1]=='\t'))
-				pos--;
-			// 再删除连续非空白字符
-			while(pos > 0 && (buf[pos-1] != ' ' && buf[pos-1] != '\t'))
-				pos--;
-			int numDeleted = i - pos;
-			// 使用循环将 buf[i...] 移到 buf[pos...]
-			for (int j = 0; j <= len - i; j++) {
-				buf[pos + j] = buf[i + j];
-			}
-			len -= numDeleted;
-			i = pos;
-			// 重新输出
-			printf("%s", buf);
-			// 将光标调回到正确位置
-			if(len - i > 0)
-				printf("\033[%dD", len - i);
-			continue;
-		}
-        // 处理 ESC 开头的控制序列 (方向键)
-        if (ch == 27) {
-            if (read(0, &temp, 1) != 1)
-                continue;
-            if (temp == '[') {
-                if (read(0, &temp, 1) != 1)
-                    continue;
-                if (temp == 'D') { // 左箭头
-                    if (i > 0) {
-                        i--;
-                    } else {
-						printf("\033[C"); // 光标右移
+
+        // Backspace: 删除光标左侧的一个字符 (ASCII 8)
+		case 127:
+        case '\b':
+            if (i > 0) {
+                // 删除光标左侧的字符并将后面的字符左移覆盖
+                memmove(&buf[i - 1], &buf[i], len - i + 1);
+                i--;
+                len--;
+                refresh_line(prompt, buf, len, i);
+            }
+            break;
+
+        // ESC 序列，处理方向键（上下左右）
+        case 27: {
+            char seq[3];
+            if (read(0, &seq[0], 1) != 1) continue;
+            if (read(0, &seq[1], 1) != 1) continue;
+            if (seq[0] == '[') {
+                // 如果第一次进入历史浏览模式，则保存当前行
+                if (hist_nav_idx == -1) {
+                    strcpy(lastcmd, buf);
+                }
+                switch (seq[1]) {
+                case 'A': // 上箭头：浏览上一条历史记录
+					printf("\x1b[B"); // 限制光标移动
+					if (hist_count == 0) continue; // 若没有历史记录，则忽略
+					// 计算出最旧的一条历史记录的索引
+					int oldest_idx = (hist_latest - hist_count + HISTFILESIZE) % HISTFILESIZE;
+
+					if (hist_nav_idx == -1) {
+						// 第一次按上箭头，从最新记录开始向前浏览
+						hist_nav_idx = (hist_latest + HISTFILESIZE - 1) % HISTFILESIZE;
+					} else {
+						// 如果当前不是最旧的记录，才继续向前
+						if (hist_nav_idx != oldest_idx) {
+							hist_nav_idx = (hist_nav_idx + HISTFILESIZE - 1) % HISTFILESIZE;
+						}
 					}
-                } else if (temp == 'C') { // 右箭头
+					
+					// 由于 histcmd 是循环数组，可能包含旧的空字符串，但此逻辑下不会访问到未赋值的区域
+					strcpy(buf, histcmd[hist_nav_idx]);
+					len = strlen(buf);
+					i = len;
+					refresh_line(prompt, buf, len, i);
+					break;
+
+                case 'B': // 下箭头：浏览下一条历史记录
+					// printf("\x1b[A"); // 限制光标
+                    if (hist_nav_idx == -1) continue; // 没有进入历史浏览模式则忽略
+                    // 如果已处于最新历史记录，则退出历史浏览模式返回之前行内容
+                    if (hist_nav_idx == (hist_latest + HISTFILESIZE - 1) % HISTFILESIZE) {
+                        hist_nav_idx = -1;
+                        strcpy(buf, lastcmd);
+                    } else {
+                        hist_nav_idx = (hist_nav_idx + 1) % HISTFILESIZE;
+                        while (histcmd[hist_nav_idx][0] == '\0' && hist_nav_idx != (hist_latest + HISTFILESIZE - 1) % HISTFILESIZE) {
+                            hist_nav_idx = (hist_nav_idx + 1) % HISTFILESIZE;
+                        }
+                        strcpy(buf, histcmd[hist_nav_idx]);
+                    }
+                    len = strlen(buf);
+                    i = len;
+                    refresh_line(prompt, buf, len, i);
+                    break;
+
+                case 'C': // 右箭头：光标向右移动
                     if (i < len) {
                         i++;
                     } else {
-						printf("\033[D"); // 光标左移
+                        printf("\x1b[D");
 					}
-                } else if (temp == 'A') { // 上箭头
-					printf("\033[B");
-					flushline(i, len);
-					// 如果尚未开始切换历史，则先保存当前输入到 lastcmd
-					if(lasthist == -1) {
-						buf[len] = '\0';
-						strcpy(lastcmd, buf);
+                    break;
+
+                case 'D': // 左箭头：光标向左移动
+                    if (i > 0) {
+                        i--;
+                    } else {
+						printf("\x1b[C");
 					}
-					if (lasthist == -1) {
-						if (hist == 0) {
-							if (strcmp(histcmd[HISTFILESIZE - 1], "") != 0) {
-								lasthist = (hist + HISTFILESIZE - 1) % HISTFILESIZE;
-							} else {
-								lasthist = 0; // 已是最前，不变
-							}
-						} else {
-							lasthist = (hist + HISTFILESIZE - 1) % HISTFILESIZE;
-						}
-					} else {
-						if (lasthist == 0 && strcmp(histcmd[HISTFILESIZE - 1], "") == 0)
-							; // 已是最前，不变
-						else if (lasthist == hist) {
-							; // 已是最前，不变
-						} else {
-							lasthist = (lasthist + HISTFILESIZE - 1) % HISTFILESIZE;
-						}
-					}
-					strcpy(buf, histcmd[lasthist]);
-					if(buf[strlen(buf)-1]=='\n'){
-						buf[strlen(buf)-1]='\0';
-					}
-					i = strlen(buf);
-					len = i;
-					printf("%s", buf);
-					continue;
-				} else if (temp == 'B') { // 下箭头
-					flushline(i, len);
-					if (lasthist == -1) {
-						buf[len] = '\0';
-						strcpy(lastcmd, buf);
-						i = strlen(buf);
-						len = i;
-						printf("%s", buf);
-						continue;
-					} else {
-						if (lasthist == ((hist + HISTFILESIZE - 1) % HISTFILESIZE) || strcmp(histcmd[(lasthist + 1) % HISTFILESIZE], "") == 0) { // 已是最新历史
-							lasthist = -1; // 回到当前输入
-							strcpy(buf, lastcmd);
-							i = strlen(buf);
-							len = i;
-							printf("%s", buf);
-							continue;
-						} else {
-							lasthist = (lasthist + 1) % HISTFILESIZE;
-						}
-					}
-					strcpy(buf, histcmd[lasthist]);
-					if(buf[strlen(buf)-1]=='\n'){
-						buf[strlen(buf)-1]='\0';
-					}
-					i = strlen(buf);
-					len = i;
-					printf("%s", buf);
-					continue;
-				}
+                    break;
+                }
             }
-            continue;
+            break;
         }
-        // 处理 Backspace (ASCII 127)
-        if (ch == 127) {
-            if (i <= 0)
-                continue;  // 已在最左侧
-            i--;      // 光标左移一位
-            len--;    // 总字符数减少
-            // 手动将光标位置后面的字符前移一位
-            for (int j = i; j < len; j++) {
-                buf[j] = buf[j+1];
+
+        // 可打印字符的插入处理（普通字符插入）
+        default:
+            if (ch >= 32 && ch < 127) { // 若字符可打印
+                if (len < n - 1) {
+                    // 如果光标不在行尾，则先将后面的字符后移，为新字符预留位置
+                    memmove(&buf[i + 1], &buf[i], len - i + 1);
+                    buf[i] = ch; // 插入新字符
+                    len++;
+                    i++;
+                    refresh_line(prompt, buf, len, i);
+                }
             }
-            buf[len] = '\0';
-            // 重新显示从当前位置开始的完整字符串，覆盖原有显示：
-            // 先将光标移到行首，再输出从当前位置到末尾的字符串，后面再追加空格
-            printf("\033[%dD", i + 1);
-            printf("%s ", buf);
-            // 移动光标回到原来的位置
-            printf("\033[%dD", (len - i + 1));
-            continue;
-        }
-       
-        if (len < (int)n - 1) { // 普通字符插入处理
-			// 将光标当前位置之后的字符向后移动1位
-			for (int j = len; j >= i; j--) {
-                buf[j+1] = buf[j];
-            }
-			buf[i] = ch;
-			len++;
-			printf("\033[%dD", i + 1);
-			printf("%s", buf);
-			if ((r = len - i - 1) != 0) {
-				printf("\033[%dD", r);
-			}
-			i++;
+            break;
         }
     }
 }
@@ -798,11 +913,29 @@ int main(int argc, char **argv) {
 	int interactive = iscons(0);
 	int echocmds = 0;
 
-	printf("\n:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\n");
-	printf("::                                                         ::\n");
-	printf("::                     MOS Shell 2025                      ::\n");
-	printf("::                                                         ::\n");
-	printf(":::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\n");
+	// --- New, Professional Box-style Welcome Screen ---
+    // Using box-drawing characters for a clean, window-like border.
+    // \x1b[1;36m -> Bright Cyan for the border and details
+    // \x1b[1;37m -> Bright White for the main logo
+    // \x1b[1;33m -> Bright Yellow for the title
+    // \x1b[1;35m -> Bright Magenta for the subtitle
+    // \x1b[0m    -> Reset color
+    printf("\n");
+    printf("\x1b[1;36m╔═══════════════════════════════════════════════════════════════════════════╗\x1b[0m\n");
+    printf("\x1b[1;36m║\x1b[0m                                                                           \x1b[1;36m║\x1b[0m\n");
+    printf("\x1b[1;36m║\x1b[0m    \x1b[1;37m               ███╗   ███╗   ██████╗    ███████╗                       \x1b[1;36m║\x1b[0m\n");
+    printf("\x1b[1;36m║\x1b[0m    \x1b[1;37m               ████╗ ████║  ██╔═══██╗   ██╔════╝                       \x1b[1;36m║\x1b[0m\n");
+    printf("\x1b[1;36m║\x1b[0m    \x1b[1;37m               ██╔████╔██║  ██║   ██║   ███████╗                       \x1b[1;36m║\x1b[0m\n");
+    printf("\x1b[1;36m║\x1b[0m    \x1b[1;37m               ██║╚██╔╝██║  ██║   ██║   ╚════██║                       \x1b[1;36m║\x1b[0m\n");
+    printf("\x1b[1;36m║\x1b[0m    \x1b[1;37m               ██║ ╚═╝ ██║  ╚██████╔╝   ███████║                       \x1b[1;36m║\x1b[0m\n");
+    printf("\x1b[1;36m║\x1b[0m    \x1b[1;37m               ╚═╝     ╚═╝   ╚═════╝    ╚══════╝                       \x1b[1;36m║\x1b[0m\n");
+    printf("\x1b[1;36m║\x1b[0m                                                                           \x1b[1;36m║\x1b[0m\n");
+    printf("\x1b[1;36m╟───────────────────────────────────────────────────────────────────────────╢\x1b[0m\n");
+    printf("\x1b[1;36m║\x1b[0m                       \x1b[1;33m  WELCOME TO THE MOS SHELL  \x1b[0m                        \x1b[1;36m║\x1b[0m\n");
+    printf("\x1b[1;36m║\x1b[0m                           \x1b[1;35m  ~ BUAA-OS-2025 ~  \x1b[0m                            \x1b[1;36m║\x1b[0m\n");
+    printf("\x1b[1;36m╚═══════════════════════════════════════════════════════════════════════════╝\x1b[0m\n");
+    printf("\x1b[0m"); // Reset color completely
+
 	ARGBEGIN {
 	case 'i':
 		interactive = 1;
@@ -838,7 +971,7 @@ int main(int argc, char **argv) {
 		readline(buf, sizeof buf);
 
 		write_history(buf); // 保存历史指令到.mos-history
-
+		
 		if (buf[0] == '#') {
 			continue;
 		}

@@ -627,7 +627,7 @@ int envvar_declare(struct Env *env, const char *name, const char *value, int per
     v->owner = caller_shell_id;
     v->next = env->env_vars;
     env->env_vars = v;
-    printk("envvar_declare: declared %s=%s, perm=%d, owner=%d\n", v->name, v->value, v->perm, v->owner);
+    // printk("envvar_declare: declared %s=%s, perm=%d, owner=%d\n", v->name, v->value, v->perm, v->owner);
     return 0;
 }
 

@@ -545,7 +545,7 @@ int sys_alloc_shell_id(void) {
     static int next_shell_id = 1;
     int id = next_shell_id++;
     curenv->env_shell_id = id;
-    printk("sys_alloc_shell_id: allocated shell id %d\n", id);
+    // printk("sys_alloc_shell_id: allocated shell id %d\n", id);
     return id;
 }
 
