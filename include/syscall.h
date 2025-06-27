@@ -29,6 +29,7 @@ enum {
 	SYS_unset_var,
 	SYS_get_var,
 	SYS_get_all_var,
+	SYS_get_parent_id,
 	MAX_SYSNO,
 };
 

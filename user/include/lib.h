@@ -14,7 +14,7 @@
 #define pages ((const volatile struct Page *)UPAGES)
 
 // libos
-void exit(void) __attribute__((noreturn));
+void exit(int status) __attribute__((noreturn));
 
 extern const volatile struct Env *env;
 
@@ -75,13 +75,14 @@ int syscall_unset_var(const char *name, int caller_shell_id);
 int syscall_get_var(const char *name, char *value, int bufsize);
 int syscall_get_all_var(char *buf, int bufsize);
 int syscall_alloc_shell_id(void);
+int syscall_get_parent_id(u_int);
 
 // ipc.c
 void ipc_send(u_int whom, u_int val, const void *srcva, u_int perm);
 u_int ipc_recv(u_int *whom, void *dstva, u_int *perm);
 
 // wait.c
-void wait(u_int envid);
+int wait(u_int envid);
 
 // console.c
 int opencons(void);

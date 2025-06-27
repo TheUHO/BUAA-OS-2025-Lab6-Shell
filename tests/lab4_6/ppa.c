@@ -129,7 +129,7 @@ int main() {
 			syscall_yield();
 		}
 		srv(srvs[0]);
-		exit();
+		exit(0);
 	}
 
 	fork_n(tot >> 1);

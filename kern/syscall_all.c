@@ -566,6 +566,14 @@ int sys_get_all_var(char *buf, int bufsize) {
     return envvar_getall(curenv, buf, bufsize);
 }
 
+u_int sys_get_parent_id(u_int envid) {
+    struct Env *e;
+    if (envid2env(envid, &e, 1) < 0) {
+        return 0; // or an error code
+    }
+    return e->env_parent_id;
+}
+
 void *syscall_table[MAX_SYSNO] = {
     [SYS_putchar] = sys_putchar,
     [SYS_print_cons] = sys_print_cons,
@@ -592,6 +600,7 @@ void *syscall_table[MAX_SYSNO] = {
 	[SYS_unset_var] = sys_unset_var,
 	[SYS_get_var] = sys_get_var,
 	[SYS_get_all_var] = sys_get_all_var,
+	[SYS_get_parent_id] = sys_get_parent_id,
 };
 
 /* Overview:

@@ -10,7 +10,7 @@ int hist_latest = 0; // Index to write the *next* command
 int hist_count = 0;  // Total number of commands in history
 
 int global_shell_id;
-
+int flag_next_is_condition = 0;
 
 void runcmd(char *);
 static void strncpy(char *, const char *, int);
@@ -24,7 +24,7 @@ int process_backquote(const char *s, char *output, int outsize, int *consumed) {
     }
     int cmd_len = closing - start;  // 反引号中命令的长度
 
-    char cmd[1024];
+    char cmd[256];
     if (cmd_len >= (int)sizeof(cmd)) {
         cmd_len = sizeof(cmd) - 1;
     }
@@ -48,12 +48,12 @@ int process_backquote(const char *s, char *output, int outsize, int *consumed) {
         close(p[0]);
         close(p[1]);
         runcmd(cmd);
-        exit();
+        exit(1);
     } else {
         // --- 父进程 ---
         close(p[1]);
         int pos = 0, n;
-        while ((n = read(p[0], output + pos, 1024)) > 0) {
+        while ((n = read(p[0], output + pos, 64)) > 0) {
             pos += n;
         }
         output[pos] = '\0';
@@ -99,8 +99,22 @@ int _gettoken(char *s, char **p1, char **p2) {
         s[0] = '\0'; // 将 ">>" 所在位置用空字符截断
         s[1] = '\0';
         *p2 = s + 2; // p2 指向 ">>" 之后的位置
-        return '+'; 
+        return '-'; 
     }
+
+    if (*s == '&' && *(s + 1) == '&') {
+		*p1 = s;
+		s[0] = s[1] = 0;
+		*p2 = s + 2;
+		return '*'; // 代表 &&
+	}
+
+	if (*s == '|' && *(s + 1) == '|') {
+		*p1 = s;
+		s[0] = s[1] = 0;
+		*p2 = s + 2;
+		return '+'; // 代表 ||
+	}
 
 	if (strchr(SYMBOLS, *s)) {
 		int t = *s;
@@ -124,13 +138,13 @@ int _gettoken(char *s, char **p1, char **p2) {
 	while (*s && !strchr(WHITESPACE SYMBOLS, *s)) {
         if (*s == '`') {
             int consumed = 0;
-            char substitution[1024] = {0};
+            char substitution[64] = {0};
             if (process_backquote(s, substitution, sizeof(substitution), &consumed) != 0) {
                 debugf("Syntax error: unmatched backquote.\n");
                 return -1;
             }
             // 保存反引号之后的剩余部分
-            char remainder[1024] = {0};
+            char remainder[64] = {0};
             strcpy(remainder, s + consumed);
             // 用 substitution 覆盖当前反引号表达式部分
             strcpy(s, substitution);
@@ -264,14 +278,14 @@ int parsecmd(char **argv, int *rightpipe) {
 		case 'w':
 			if (argc >= MAXARGS) {
 				debugf("too many arguments\n");
-				exit();
+				exit(1);
 			}
 			argv[argc++] = t;
 			break;
 		case '<':
 			if (gettoken(0, &t) != 'w') {
 				debugf("syntax error: < not followed by word\n");
-				exit();
+				exit(1);
 			}
 			// Open 't' for reading, dup it onto fd 0, and then close the original fd.
 			// If the 'open' function encounters an error,
@@ -281,7 +295,7 @@ int parsecmd(char **argv, int *rightpipe) {
 			fd = open(t, O_RDONLY);
 			if (fd < 0) {
 				debugf("failed to open '%s'\n", t);
-				exit();
+				exit(1);
 			}
 			dup(fd, 0);
 			close(fd);
@@ -291,7 +305,7 @@ int parsecmd(char **argv, int *rightpipe) {
 		case '>':
 			if (gettoken(0, &t) != 'w') {
 				debugf("syntax error: > not followed by word\n");
-				exit();
+				exit(1);
 			}
 			// Open 't' for writing, create it if not exist and trunc it if exist, dup
 			// it onto fd 1, and then close the original fd.
@@ -302,7 +316,7 @@ int parsecmd(char **argv, int *rightpipe) {
 			fd = open(t, O_WRONLY | O_CREAT | O_TRUNC);
 			if (fd < 0) {
 				debugf("failed to open '%s'\n", t);
-				exit();
+				exit(1);
 			}
 			dup(fd, 1);
 			close(fd);
@@ -312,7 +326,7 @@ int parsecmd(char **argv, int *rightpipe) {
         case ';':
             if ((r = fork()) < 0) {
                 debugf("fork: %d\n", r);
-                exit();
+                exit(1);
             }
             *rightpipe = r;
             if (r == 0) {
@@ -323,22 +337,22 @@ int parsecmd(char **argv, int *rightpipe) {
             }
             break;
 
-        case '+':
+        case '-':
             if (gettoken(0, &t) != 'w') {
                 debugf("syntax error: >> not followed by word\n");
-                exit();
+                exit(1);
             }
             // 以只写方式打开文件；如果文件不存在，则创建它
             if ((fd = open(t, O_WRONLY | O_CREAT)) < 0) {
                 debugf("open %s for append: %d\n", t, fd);
-                exit();
+                exit(1);
             }
             // 将文件指针移动到文件末尾以实现追加
             // 1. 从文件描述符数字获取 Fd 结构体指针
             struct Fd *fd_struct;
             if ((r = fd_lookup(fd, &fd_struct)) < 0) {
                 debugf("fd_lookup error for fd %d: %d\n", fd, r);
-                exit();
+                exit(1);
             }
             // 2. 将 Fd 结构体转换为 Filefd 结构体以访问文件元数据
             struct Filefd *ffd = (struct Filefd *)fd_struct;
@@ -347,6 +361,48 @@ int parsecmd(char **argv, int *rightpipe) {
             // 将标准输出重定向到该文件
             dup(fd, 1);
             close(fd);
+            break;
+
+        case '*': // 处理 &&
+            int pid_and = fork();
+            if (pid_and < 0) user_panic("fork for && failed");
+
+            if (pid_and == 0) {
+                // 子进程：负责执行 '&&' 左边的命令。
+                // 它直接从 parsecmd 返回，将解析好的 argv 交给 runcmd 执行。
+                return argc;
+            } else {
+                // 父进程：作为协调者。
+                int exit_status = wait(pid_and); // 等待子进程执行完毕，并获取其退出状态。
+
+                if (exit_status == 0) {
+                    // 左边命令成功，父进程继续解析 '&&' 右边的命令。
+                    return parsecmd(argv, rightpipe);
+                } else {
+                    return 0;
+                }
+            }
+            break;
+
+        case '+':  // 处理 ||
+            int pid_or = fork();
+            if (pid_or < 0) user_panic("fork for || failed");
+
+            if (pid_or == 0) {
+                // 子进程：执行 '||' 左边的命令。
+                return argc;
+            } else {
+                // 父进程：协调者。
+                int exit_status = wait(pid_or);
+
+                if (exit_status != 0) {
+                    // 左边命令失败，父进程继续解析 '||' 右边的命令。
+                    return parsecmd(argv, rightpipe);
+                } else {
+                    // 左边命令成功，跳过后续命令，直到遇到 '&&' 或 ';'
+                    return 0;
+                }
+            }
             break;
 
 		case '|':;
@@ -369,11 +425,11 @@ int parsecmd(char **argv, int *rightpipe) {
 			/* Exercise 6.5: Your code here. (3/3) */
 			if ((r = pipe(p)) != 0) {
 				debugf("pipe: %d\n", r);
-				exit();
+				exit(1);
 			}
 			if ((r = fork()) < 0) {
 				debugf("fork: %d\n", r);
-				exit();
+				exit(1);
 			}
 			*rightpipe = r;
 			if (r == 0) {
@@ -407,38 +463,39 @@ int chpwd(int argc, char **argv) {
 		if ((r = chdir("/")) < 0) {
             printf("cd failed: %d\n", r);
             return 0;
-			// exit();
+            exit(0);
         }
 		return 0;
+        exit(0);
 	}
     if (argc > 2) {
         printf("Too many args for cd command\n");
         return 1;
-		exit();
+		exit(1);
 	}
 	struct Stat state;
     if (argv[1][0] == '/') { // 绝对路径处理
         if ((r = stat(argv[1], &state)) < 0) {
             printf("cd: The directory '%s' does not exist\n", argv[1]);
             return 1;
-			exit();
+			exit(1);
 		}
         if (!state.st_isdir) {
             printf("cd: '%s' is not a directory\n", argv[1]);
             return 1;
-			exit();
+			exit(1);
 		}
         if ((r = chdir(argv[1])) < 0) {
             printf("cd failed: %d\n", r);
             return 1;
-			exit();
+			exit(1);
         }
     } else { // 相对路径处理
         char path[128];
         if ((r = getcwd(path)) < 0) {
             printf("cd failed: %d\n", r);
             return 1;
-			exit();
+			exit(1);
         }
         // 特殊处理 ".."：退回上一级目录
         if (argv[1][0] == '.' && argv[1][1] == '.') {
@@ -461,23 +518,23 @@ int chpwd(int argc, char **argv) {
 		if ((r = open(path, O_RDONLY)) < 0) {
 			printf("cd: The directory '%s' does not exist\n", argv[1]);
 			return 1;
-			exit();
+			exit(1);
 		}
 		close(r);
         if ((r = stat(path, &state)) < 0) {
             printf("cd: The directory '%s' does not exist\n", argv[1]);
             return 1;
-			exit();
+			exit(1);
         }
         if (!state.st_isdir) {
             printf("cd: '%s' is not a directory\n", argv[1]);
             return 1;
-			exit();
+			exit(1);
         }
         if ((r = chdir(path)) < 0) {
             printf("cd failed: %d\n", r);
             return 1;
-			exit();
+			exit(1);
         }
     }
     return 0;
@@ -536,7 +593,7 @@ int declare(int argc, char **argv, int global_shell_id) {
     }
     if (i >= argc) {
         /* 若无后续参数，则输出所有变量 */
-        char all[1024];
+        char all[256];
         syscall_get_all_var(all, sizeof(all));
         printf("%s", all);
         return 0;
@@ -606,8 +663,10 @@ void runcmd(char *s) {
 	char *argv[MAXARGS];
 	int rightpipe = 0;
 	int r;
+    int exit_status = 0;
 	int argc = parsecmd(argv, &rightpipe);
 	if (argc == 0) {
+        exit(0);
 		return;
 	}
 	argv[argc] = 0;
@@ -621,34 +680,31 @@ void runcmd(char *s) {
 		// printf("do cd2\n");
 		if (strcmp(argv[0], "cd") == 0) {
 			// printf("do cd3\n");
-			if ((r = chpwd(argc, argv)) != 0) {
-				return;
-			}
+			r = chpwd(argc, argv);
+			// exit(r);
 			return;
 		} else if (strcmp(argv[0], "pwd") == 0) {
-			if ((r = pwd(argc)) != 0) {
-				return;
-			}
+			r = pwd(argc);
+            // exit(r);
 			return;
 		} else if (strcmp(argv[0], "declare") == 0) {
-            if ((r = declare(argc, argv, global_shell_id)) != 0) {
-                return;
-            }
+            r = declare(argc, argv, global_shell_id);
+            // exit(r);
             return;
         } else if (strcmp(argv[0], "unset") == 0) {
-            if ((r = unset(argc, argv, global_shell_id)) != 0) {
-                return;
-            }
+            r = unset(argc, argv, global_shell_id);
+            // exit(r);
             return;
         } else if (strcmp(argv[0], "history") == 0) {
 			history();
+            // exit(0);
 			return;
     	}
     }
 
 	int child = spawn(argv[0], argv);
 	if (child < 0) {
-        char cmd[1024];
+        char cmd[256];
         int len = strlen(argv[0]);
         strcpy(cmd, argv[0]);
         if (len >= 2 && cmd[len - 2] == '.' && cmd[len - 1] == 'b') {
@@ -662,14 +718,15 @@ void runcmd(char *s) {
     }
 	close_all();
 	if (child >= 0) {
-		wait(child);
+		exit_status = wait(child);
 	} else {
 		debugf("spawn %s: %d\n", argv[0], child);
+        exit_status = 1; // 命令未找到，设置失败状态
 	}
 	if (rightpipe) {
 		wait(rightpipe);
 	}
-	exit();
+	exit(exit_status);
 }
 
 void *memmove(void *dest, const void *src, size_t n) {
@@ -719,7 +776,7 @@ void readline(char *buf, u_int n) {
     while (1) {
         int r = read(0, &ch, 1);
         if (r < 1) {
-            exit();
+            exit(1);
         }
 
         switch (ch) {
@@ -895,7 +952,7 @@ char buf[1024];
 
 void usage(void) {
 	printf("usage: sh [-ix] [script-file]\n");
-	exit();
+	exit(1);
 }
 
 int startswith(const char *s, const char *prefix) {
@@ -914,27 +971,33 @@ int main(int argc, char **argv) {
 	int echocmds = 0;
 
 	// --- New, Professional Box-style Welcome Screen ---
-    // Using box-drawing characters for a clean, window-like border.
-    // \x1b[1;36m -> Bright Cyan for the border and details
-    // \x1b[1;37m -> Bright White for the main logo
-    // \x1b[1;33m -> Bright Yellow for the title
-    // \x1b[1;35m -> Bright Magenta for the subtitle
-    // \x1b[0m    -> Reset color
-    printf("\n");
-    printf("\x1b[1;36m╔═══════════════════════════════════════════════════════════════════════════╗\x1b[0m\n");
-    printf("\x1b[1;36m║\x1b[0m                                                                           \x1b[1;36m║\x1b[0m\n");
-    printf("\x1b[1;36m║\x1b[0m    \x1b[1;37m               ███╗   ███╗   ██████╗    ███████╗                       \x1b[1;36m║\x1b[0m\n");
-    printf("\x1b[1;36m║\x1b[0m    \x1b[1;37m               ████╗ ████║  ██╔═══██╗   ██╔════╝                       \x1b[1;36m║\x1b[0m\n");
-    printf("\x1b[1;36m║\x1b[0m    \x1b[1;37m               ██╔████╔██║  ██║   ██║   ███████╗                       \x1b[1;36m║\x1b[0m\n");
-    printf("\x1b[1;36m║\x1b[0m    \x1b[1;37m               ██║╚██╔╝██║  ██║   ██║   ╚════██║                       \x1b[1;36m║\x1b[0m\n");
-    printf("\x1b[1;36m║\x1b[0m    \x1b[1;37m               ██║ ╚═╝ ██║  ╚██████╔╝   ███████║                       \x1b[1;36m║\x1b[0m\n");
-    printf("\x1b[1;36m║\x1b[0m    \x1b[1;37m               ╚═╝     ╚═╝   ╚═════╝    ╚══════╝                       \x1b[1;36m║\x1b[0m\n");
-    printf("\x1b[1;36m║\x1b[0m                                                                           \x1b[1;36m║\x1b[0m\n");
-    printf("\x1b[1;36m╟───────────────────────────────────────────────────────────────────────────╢\x1b[0m\n");
-    printf("\x1b[1;36m║\x1b[0m                       \x1b[1;33m  WELCOME TO THE MOS SHELL  \x1b[0m                        \x1b[1;36m║\x1b[0m\n");
-    printf("\x1b[1;36m║\x1b[0m                           \x1b[1;35m  ~ BUAA-OS-2025 ~  \x1b[0m                            \x1b[1;36m║\x1b[0m\n");
-    printf("\x1b[1;36m╚═══════════════════════════════════════════════════════════════════════════╝\x1b[0m\n");
-    printf("\x1b[0m"); // Reset color completely
+    // // Using box-drawing characters for a clean, window-like border.
+    // // \x1b[1;36m -> Bright Cyan for the border and details
+    // // \x1b[1;37m -> Bright White for the main logo
+    // // \x1b[1;33m -> Bright Yellow for the title
+    // // \x1b[1;35m -> Bright Magenta for the subtitle
+    // // \x1b[0m    -> Reset color
+    // printf("\n");
+    // printf("\x1b[1;36m╔═══════════════════════════════════════════════════════════════════════════╗\x1b[0m\n");
+    // printf("\x1b[1;36m║\x1b[0m                                                                           \x1b[1;36m║\x1b[0m\n");
+    // printf("\x1b[1;36m║\x1b[0m    \x1b[1;37m               ███╗   ███╗   ██████╗    ███████╗                       \x1b[1;36m║\x1b[0m\n");
+    // printf("\x1b[1;36m║\x1b[0m    \x1b[1;37m               ████╗ ████║  ██╔═══██╗   ██╔════╝                       \x1b[1;36m║\x1b[0m\n");
+    // printf("\x1b[1;36m║\x1b[0m    \x1b[1;37m               ██╔████╔██║  ██║   ██║   ███████╗                       \x1b[1;36m║\x1b[0m\n");
+    // printf("\x1b[1;36m║\x1b[0m    \x1b[1;37m               ██║╚██╔╝██║  ██║   ██║   ╚════██║                       \x1b[1;36m║\x1b[0m\n");
+    // printf("\x1b[1;36m║\x1b[0m    \x1b[1;37m               ██║ ╚═╝ ██║  ╚██████╔╝   ███████║                       \x1b[1;36m║\x1b[0m\n");
+    // printf("\x1b[1;36m║\x1b[0m    \x1b[1;37m               ╚═╝     ╚═╝   ╚═════╝    ╚══════╝                       \x1b[1;36m║\x1b[0m\n");
+    // printf("\x1b[1;36m║\x1b[0m                                                                           \x1b[1;36m║\x1b[0m\n");
+    // printf("\x1b[1;36m╟───────────────────────────────────────────────────────────────────────────╢\x1b[0m\n");
+    // printf("\x1b[1;36m║\x1b[0m                       \x1b[1;33m  WELCOME TO THE MOS SHELL  \x1b[0m                        \x1b[1;36m║\x1b[0m\n");
+    // printf("\x1b[1;36m║\x1b[0m                           \x1b[1;35m  ~ BUAA-OS-2025 ~  \x1b[0m                            \x1b[1;36m║\x1b[0m\n");
+    // printf("\x1b[1;36m╚═══════════════════════════════════════════════════════════════════════════╝\x1b[0m\n");
+    // printf("\x1b[0m"); // Reset color completely
+
+    printf("\n:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\n");
+	printf("::                                                         ::\n");
+	printf("::                     MOS Shell 2025                      ::\n");
+	printf("::                                                         ::\n");
+	printf(":::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\n");
 
 	ARGBEGIN {
 	case 'i':
@@ -980,7 +1043,7 @@ int main(int argc, char **argv) {
 		}
 		// 根据 buf 的起始判断是否为内建命令 exit、cd 或 pwd
         if (startswith(buf, "exit")) {
-			exit();
+			exit(0);
             break; // 直接退出循环
         }
         if (startswith(buf, "cd") || startswith(buf, "pwd") 
@@ -994,7 +1057,6 @@ int main(int argc, char **argv) {
 		}
 		if (r == 0) {
 			runcmd(buf);
-			exit();
 		} else {
 			wait(r);
 		}

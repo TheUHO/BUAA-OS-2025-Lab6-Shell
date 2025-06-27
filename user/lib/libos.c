@@ -2,12 +2,17 @@
 #include <lib.h>
 #include <mmu.h>
 
-void exit(void) {
+void exit(int status) {
 	// After fs is ready (lab5), all our open files should be closed before dying.
 #if !defined(LAB) || LAB >= 5
 	close_all();
 #endif
 
+	u_int parent_id = syscall_get_parent_id(0);
+	// 如果父进程存在，则通过IPC发送返回值
+	if (parent_id != 0) {
+		ipc_send(parent_id, status, 0, 0);
+	}
 	syscall_env_destroy(0);
 	user_panic("unreachable code");
 }
@@ -20,8 +25,8 @@ void libmain(int argc, char **argv) {
 	env = &envs[ENVX(syscall_getenvid())];
 
 	// call user main routine
-	main(argc, argv);
+	int r = main(argc, argv);
 
 	// exit gracefully
-	exit();
+	exit(r);
 }

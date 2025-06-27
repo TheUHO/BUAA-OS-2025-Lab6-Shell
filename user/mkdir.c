@@ -47,6 +47,8 @@ int main(int argc, char **argv) {
         path[--len] = '\0';
     }
 
+    // printf("path: %s", path);
+
     // 如果目录或文件已经存在
     if ((r = dir_exists(path)) != 0) {
         printf("mkdir: cannot create directory '%s': File exists\n", path);

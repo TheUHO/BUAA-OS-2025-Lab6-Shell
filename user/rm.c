@@ -2,7 +2,7 @@
 
 void usage(void) {
     printf("Usage: rm [-r|-rf] <file_or_dir>\n");
-    exit();
+    exit(1);
 }
 
 int main(int argc, char **argv) {

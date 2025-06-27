@@ -102,3 +102,7 @@ int syscall_get_var(const char *name, char *value, int bufsize) {
 int syscall_get_all_var(char *buf, int bufsize) {
     return msyscall(SYS_get_all_var, (u_int)buf, bufsize);
 }
+
+int syscall_get_parent_id(u_int envid) {
+    return msyscall(SYS_get_parent_id, envid);
+}
